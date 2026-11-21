@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no">
+    <title>BULKHEAD</title>
+    <link rel="stylesheet" href="TemplateData/style.css">
+  </head>
+  <body>
+    <!--
+      BULKHEAD WebGL page (custom template, ARCHITECTURE §8). The game fills the window.
+      Colours are palette entries only (tools/palette/palette.json): SpaceDeep #6A73A0, SpaceGlow #B7B2E0,
+      Cloud #EFF2D1, Coral #FD978B, DeepBrown #645245. No external requests (TSA: playable offline/on any host).
+    -->
+    <canvas id="unity-canvas" tabindex="-1"></canvas>
+    <div id="loader">
+      <div class="logo" aria-label="BULKHEAD"></div>
+      <div id="loader-tagline">Every door is sealed.</div>
+      <div id="loader-track"><div id="loader-fill"></div></div>
+      <div id="loader-tip"></div>
+    </div>
+    <div id="message"></div>
+    <!-- T89: phones/tablets and browsers without WebGL 2 get a friendly note instead of a broken page -->
+    <div id="device" hidden>
+      <div class="logo" aria-label="BULKHEAD"></div>
+      <div id="device-text"></div>
+      <button id="device-anyway" type="button">Try anyway</button>
+    </div>
+    <button id="fullscreen" type="button" title="Fullscreen" hidden>Fullscreen</button>
+    <script>
+      // Browsers may refuse pointer lock (no user gesture, embedded iframe, tab not focused). Unity reports that
+      // as a fatal error; it is not one - the game just waits for the next click. Registered before the loader
+      // so it runs first and keeps the refusal from reaching Unity's error handler.
+      function isPointerLockError(reason) {
+        var text = String((reason && (reason.name + " " + reason.message)) || reason || "");
+        return /pointer ?lock|WrongDocumentError/i.test(text);
+      }
+      window.addEventListener("unhandledrejection", function (event) {
+        if (isPointerLockError(event.reason)) { event.preventDefault(); event.stopImmediatePropagation(); }
+      }, true);
+      window.addEventListener("error", function (event) {
+        if (isPointerLockError(event.error || event.message)) { event.preventDefault(); event.stopImmediatePropagation(); }
+      }, true);
+
+      var canvas = document.querySelector("#unity-canvas");
+      canvas.addEventListener("pointerdown", function () { canvas.focus(); });
+
+      // In-page messages instead of alert() dialogs.
+      function showMessage(text, type) {
+        var box = document.querySelector("#message");
+        var line = document.createElement("div");
+        line.className = "message-" + (type || "info");
+        line.textContent = text;
+        box.appendChild(line);
+        if (type !== "error") setTimeout(function () { box.removeChild(line); }, 5000);
+      }
+
+      var buildUrl = "Build";
+      var config = {
+        arguments: [],
+        dataUrl: buildUrl + "/Bulkhead.data.unityweb",
+        frameworkUrl: buildUrl + "/Bulkhead.framework.js.unityweb",
+        codeUrl: buildUrl + "/Bulkhead.wasm.unityweb",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "BULKHEAD",
+        productVersion: "0.1.0",
+        showBanner: showMessage,
+        // Cap the render resolution on high-DPI laptop screens: keeps >= 50 fps (ARCHITECTURE §8).
+        // ?dpr=1 forces a value (testing); watchFrameRate below lowers it on slow machines.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, parseFloat(new URLSearchParams(location.search).get("dpr")) || 1.5),
+      };
+
+      // Weak school laptops: if the game stays below 40 fps for two 5-second windows in a row, render at
+      // 1x pixel density instead of up to 1.5x (a little less sharp, much faster). Starts after the first 10 s
+      // so loading and shader warm-up don't count.
+      function watchFrameRate(instance) {
+        var module = instance.Module;
+        if (!module || (module.devicePixelRatio || 1) <= 1) return;
+        var frames = 0, start = 0, slow = 0;
+        function tick(now) {
+          if (!start) start = now;
+          frames++;
+          var elapsed = now - start;
+          if (elapsed >= 5000) {
+            var fps = frames * 1000 / elapsed;
+            frames = 0;
+            start = now;
+            slow = (fps < 40 && !document.hidden) ? slow + 1 : 0;
+            if (slow >= 2) {
+              module.devicePixelRatio = 1;
+              console.log("[Bulkhead] Low frame rate (" + Math.round(fps) + " fps): rendering at 1x pixel density.");
+              return;
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+        setTimeout(function () { requestAnimationFrame(tick); }, 10000);
+      }
+
+      // T89: what this device is missing (keyboard + mouse, WebGL 2), or "" when it can play.
+      function deviceProblem() {
+        var coarseOnly = window.matchMedia && matchMedia("(pointer: coarse)").matches && !matchMedia("(any-pointer: fine)").matches;
+        var phone = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+        if (coarseOnly || phone) {
+          return "BULKHEAD is a first-person game for a keyboard and a mouse. Open this page on a laptop or desktop computer to play.";
+        }
+        var test = document.createElement("canvas");
+        if (!(test.getContext && test.getContext("webgl2"))) {
+          return "This browser can't show WebGL 2 graphics. Try the latest Chrome, Firefox or Edge, and make sure hardware acceleration is on.";
+        }
+        return "";
+      }
+
+      // T89: fullscreen button, shown while the mouse is free (menus, title) and the page isn't fullscreen yet.
+      var fullscreenButton = document.querySelector("#fullscreen");
+      function updateFullscreenButton() {
+        fullscreenButton.hidden = !window.bulkheadInstance || !!document.fullscreenElement || !!document.pointerLockElement;
+      }
+      fullscreenButton.addEventListener("click", function () {
+        window.bulkheadInstance.SetFullscreen(1);
+        canvas.focus();
+      });
+      document.addEventListener("fullscreenchange", updateFullscreenButton);
+      document.addEventListener("pointerlockchange", updateFullscreenButton);
+
+      // UI overhaul: the logo is built letter by letter like the in-game title (drop in, then float).
+      document.querySelectorAll(".logo").forEach(function (logo) {
+        "BULKHEAD".split("").forEach(function (letter, i) {
+          var drop = document.createElement("span");
+          drop.className = "drop";
+          drop.style.animationDelay = (0.15 + i * 0.09).toFixed(2) + "s";
+          var float = document.createElement("span");
+          float.className = "float";
+          float.style.animationDelay = (-i * 0.42).toFixed(2) + "s";
+          float.textContent = letter;
+          drop.appendChild(float);
+          logo.appendChild(drop);
+        });
+      });
+
+      // Polish: short tips while the game loads (a few seconds on a school laptop), one every 3.5 s.
+      var tips = [
+        "Every door has a way through that needs no stats.",
+        "Stuck? Press H for a hint.",
+        "Tab opens your notebook. Every clue lands there.",
+        "MIRA is helpful. MIRA is also sometimes wrong.",
+        "Wrong moves can always be undone.",
+        "Mouse and keyboard, sound on.",
+      ];
+      var tipIndex = 0;
+      function nextTip() {
+        var tip = document.querySelector("#loader-tip");
+        tip.textContent = tips[tipIndex % tips.length];
+        tipIndex++;
+      }
+      nextTip();
+      var tipTimer = setInterval(nextTip, 3500);
+
+      // Polish: a few twinkling stars behind the loader (fixed positions from a tiny seeded generator).
+      (function addStars() {
+        var loader = document.querySelector("#loader");
+        var seed = 7;
+        function next() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+        for (var i = 0; i < 70; i++) {
+          var star = document.createElement("div");
+          star.className = "star";
+          star.style.left = (next() * 100).toFixed(2) + "%";
+          star.style.top = (next() * 100).toFixed(2) + "%";
+          var size = 2 + Math.round(next() * 2);
+          star.style.width = star.style.height = size + "px";
+          star.style.animationDelay = (next() * 4).toFixed(2) + "s";
+          star.style.animationDuration = (2.5 + next() * 3).toFixed(2) + "s";
+          loader.insertBefore(star, loader.firstChild);
+        }
+      })();
+
+      function startGame() {
+      document.querySelector("#loader").hidden = false;
+      var script = document.createElement("script");
+      script.src = buildUrl + "/Bulkhead.loader.js";
+      script.onload = function () {
+        createUnityInstance(canvas, config, function (progress) {
+          document.querySelector("#loader-fill").style.width = Math.round(100 * progress) + "%";
+        }).then(function (instance) {
+          document.querySelector("#loader").style.display = "none";
+          clearInterval(tipTimer);
+          canvas.focus();
+          window.bulkheadInstance = instance;
+          watchFrameRate(instance);
+          updateFullscreenButton();
+        }).catch(function (message) {
+          showMessage(message, "error");
+        });
+      };
+      document.body.appendChild(script);
+      }
+
+      var problem = new URLSearchParams(location.search).get("anydevice") ? "" : deviceProblem();
+      if (problem) {
+        document.querySelector("#loader").hidden = true;
+        document.querySelector("#device-text").textContent = problem;
+        document.querySelector("#device").hidden = false;
+        document.querySelector("#device-anyway").addEventListener("click", function () {
+          document.querySelector("#device").hidden = true;
+          startGame();
+        });
+      } else {
+        startGame();
+      }
+    </script>
+  </body>
+</html>
